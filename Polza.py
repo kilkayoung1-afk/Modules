@@ -15,7 +15,7 @@ import tempfile
 from .. import loader, utils
 from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.errors import UserNotParticipantError
-from telethon.tl.types import Message, MessageMediaWebPage
+from telethon.tl.types import Message
 from telethon.tl.custom import Button
 
 
@@ -170,7 +170,7 @@ class PolzaMod(loader.Module):
         self._sub_cache = {}
         self._channel = None
         self._banner_path = None
-        self._media_cache = {}  # key -> media object (in-memory)
+        self._media_cache = {}
 
         if self.config["show_banner"]:
             await self._download_banner()
@@ -308,7 +308,6 @@ class PolzaMod(loader.Module):
     # ============ PARSE BUTTONS ============
     # ==================================================
     def _parse_buttons(self, text: str):
-        """Ищет [Название|url] в тексте, возвращает (чистый текст, кнопки)."""
         pattern = re.compile(r"\[([^\|\]]+)\|([^\]]+)\]")
         buttons_data = pattern.findall(text)
         clean_text = pattern.sub("", text).strip()
@@ -320,6 +319,28 @@ class PolzaMod(loader.Module):
                 for name, url in buttons_data
             ]
         return clean_text, buttons
+
+    # ==================================================
+    # ============ PANEL HELPERS ============
+    # ==================================================
+    def _panel_buttons(self):
+        return [
+            [
+                Button.inline(self.strings("btn_create"), b"polza_create"),
+                Button.inline(self.strings("btn_list"), b"polza_list"),
+            ],
+            [
+                Button.inline(self.strings("btn_top"), b"polza_top"),
+                Button.inline(self.strings("btn_stats"), b"polza_stats"),
+            ],
+            [
+                Button.inline(self.strings("btn_export"), b"polza_export"),
+                Button.inline(self.strings("btn_close"), b"polza_close"),
+            ],
+        ]
+
+    def _back_buttons(self):
+        return [[Button.inline(self.strings("btn_back"), b"polza_back")]]
 
     # ==================================================
     # ============ COMMAND: .polza ============
@@ -343,52 +364,38 @@ class PolzaMod(loader.Module):
     @loader.command()
     async def polzapanel(self, message: Message):
         """— инлайн-панель управления"""
-        buttons = [
-            [
-                Button.inline(self.strings("btn_create"), b"polza_create"),
-                Button.inline(self.strings("btn_list"), b"polza_list"),
-            ],
-            [
-                Button.inline(self.strings("btn_top"), b"polza_top"),
-                Button.inline(self.strings("btn_stats"), b"polza_stats"),
-            ],
-            [
-                Button.inline(self.strings("btn_export"), b"polza_export"),
-                Button.inline(self.strings("btn_close"), b"polza_close"),
-            ],
-        ]
-        await utils.answer(message, self.strings("panel_title"), buttons=buttons)
+        await self.inline.form(
+            text=self.strings("panel_title"),
+            message=message,
+            reply_markup=self._panel_buttons(),
+            ttl=180,
+        )
 
     @loader.callback_handler()
     async def polza_cb(self, call):
         """Обработчик кнопок панели."""
         data = call.data.decode() if isinstance(call.data, bytes) else call.data
 
+        # -------- Закрыть --------
         if data == "polza_close":
             try:
                 await call.delete()
             except Exception:
-                pass
+                try:
+                    await call.unload()
+                except Exception:
+                    pass
             return
 
+        # -------- Назад --------
         if data == "polza_back":
-            buttons = [
-                [
-                    Button.inline(self.strings("btn_create"), b"polza_create"),
-                    Button.inline(self.strings("btn_list"), b"polza_list"),
-                ],
-                [
-                    Button.inline(self.strings("btn_top"), b"polza_top"),
-                    Button.inline(self.strings("btn_stats"), b"polza_stats"),
-                ],
-                [
-                    Button.inline(self.strings("btn_export"), b"polza_export"),
-                    Button.inline(self.strings("btn_close"), b"polza_close"),
-                ],
-            ]
-            await call.edit(self.strings("panel_title"), buttons=buttons)
+            await call.edit(
+                self.strings("panel_title"),
+                reply_markup=self._panel_buttons(),
+            )
             return
 
+        # -------- Список --------
         if data == "polza_list":
             relevant = {
                 k: v for k, v in self._triggers.items()
@@ -416,10 +423,11 @@ class PolzaMod(loader.Module):
                         f"<b>{count}</b>\n"
                     )
                 text += "\n" + self.strings("flags_help")
-            buttons = [[Button.inline(self.strings("btn_back"), b"polza_back")]]
-            await call.edit(text, buttons=buttons)
+
+            await call.edit(text, reply_markup=self._back_buttons())
             return
 
+        # -------- Топ --------
         if data == "polza_top":
             if not self._counts:
                 text = self.strings("no_triggers")
@@ -433,10 +441,11 @@ class PolzaMod(loader.Module):
                     if not d:
                         continue
                     text += f"{i}. <code>{d['text']}</code> — <b>{c}</b>\n"
-            buttons = [[Button.inline(self.strings("btn_back"), b"polza_back")]]
-            await call.edit(text, buttons=buttons)
+
+            await call.edit(text, reply_markup=self._back_buttons())
             return
 
+        # -------- Статистика --------
         if data == "polza_stats":
             total = len(self._triggers)
             glob = sum(1 for v in self._triggers.values() if not v.get("local"))
@@ -458,10 +467,10 @@ class PolzaMod(loader.Module):
             text = self.strings("stats_header") + self.strings("stats_body").format(
                 total, glob, loc, media, total_hits, top_lines
             )
-            buttons = [[Button.inline(self.strings("btn_back"), b"polza_back")]]
-            await call.edit(text, buttons=buttons)
+            await call.edit(text, reply_markup=self._back_buttons())
             return
 
+        # -------- Создать (подсказка) --------
         if data == "polza_create":
             text = (
                 "➕ <b>Как создать триггер</b>\n\n"
@@ -477,24 +486,26 @@ class PolzaMod(loader.Module):
                 "<code>.create слово | 👍 -react</code>\n\n"
                 "<b>Флаги:</b> <code>-exact -local -cd N -admin</code>"
             )
-            buttons = [[Button.inline(self.strings("btn_back"), b"polza_back")]]
-            await call.edit(text, buttons=buttons)
+            await call.edit(text, reply_markup=self._back_buttons())
             return
 
+        # -------- Экспорт --------
         if data == "polza_export":
             export_data = {
                 "version": "2.0",
                 "triggers": {
-                    k: {**v, "media": None}  # медиа не сериализуется
+                    k: {**v, "media": None}
                     for k, v in self._triggers.items()
                 },
                 "counts": self._counts,
             }
-            data_bytes = json.dumps(export_data, ensure_ascii=False, indent=2).encode("utf-8")
+            data_bytes = json.dumps(
+                export_data, ensure_ascii=False, indent=2
+            ).encode("utf-8")
             file = io.BytesIO(data_bytes)
             file.name = "polza_export.json"
 
-            await call.respond(
+            await call.answer(
                 self.strings("export_done").format(len(self._triggers)),
                 alert=True,
             )
@@ -502,7 +513,6 @@ class PolzaMod(loader.Module):
                 call.chat_id,
                 file,
                 caption="📦 <b>Экспорт Polza</b>",
-                reply_to=call.message_id,
             )
             return
 
@@ -521,7 +531,6 @@ class PolzaMod(loader.Module):
 
         trigger_part, rest = args.split("|", 1)
 
-        # флаги
         flags = re.findall(r"-(exact|local|admin|react)\b", rest)
         cd_match = re.search(r"-cd\s+(\d+)", rest)
 
@@ -533,7 +542,6 @@ class PolzaMod(loader.Module):
             await utils.answer(message, self.strings("empty"))
             return
 
-        # медиа-триггер?
         is_media = response_raw.strip() == "!media"
         media_obj = None
         if is_media:
@@ -547,7 +555,6 @@ class PolzaMod(loader.Module):
             await utils.answer(message, self.strings("empty"))
             return
 
-        # ответы (рандом)
         if is_media:
             responses = []
         else:
@@ -574,7 +581,6 @@ class PolzaMod(loader.Module):
             "media": is_media,
         }
 
-        # медиа храним в памяти (persist-медиа через reply невозможно)
         if is_media:
             self._media_cache[key] = media_obj
 
@@ -739,7 +745,7 @@ class PolzaMod(loader.Module):
     # ==================================================
     @loader.command()
     async def polzablacklist(self, message: Message):
-        """— добавить/убрать текущий чат в ЧС, без аргумента — показать список"""
+        """— ЧС: add/del без аргумента — показать список"""
         args = utils.get_args_raw(message).strip().lower()
 
         if args in ("add", "+"):
@@ -817,7 +823,7 @@ class PolzaMod(loader.Module):
 
         count = 0
         for k, v in parsed["triggers"].items():
-            v["media"] = False  # медиа не переносится
+            v["media"] = False
             self._triggers[k] = v
             count += 1
 
@@ -854,7 +860,6 @@ class PolzaMod(loader.Module):
         if not isinstance(message, Message) or not message.text:
             return
 
-        # чёрный список
         if message.chat_id in self._blacklist:
             return
 
@@ -881,11 +886,9 @@ class PolzaMod(loader.Module):
 
         data = self._triggers[match_key]
 
-        # подписка
         if not await self._is_subscribed(message.sender_id):
             return
 
-        # только админы
         if data.get("admin_only"):
             try:
                 perms = await self.client.get_permissions(
@@ -896,7 +899,6 @@ class PolzaMod(loader.Module):
             except Exception:
                 return
 
-        # кулдаун
         cd = int(data.get("cooldown") or 0)
         if cd > 0:
             now = time.time()
@@ -905,7 +907,6 @@ class PolzaMod(loader.Module):
                 return
             self._cooldowns[match_key] = now
 
-        # счётчик
         self._counts[match_key] = self._counts.get(match_key, 0) + 1
         self._save_counts()
 
