@@ -1,0 +1,133 @@
+# Имя файла: VideoDownloader.py
+
+import asyncio
+import os
+import re
+import tempfile
+from urllib.parse import urlparse
+
+import yt_dlp
+from .. import loader, utils
+
+
+@loader.tds
+class VideoDownloaderMod(loader.Module):
+    """Скачивание видео по ссылке."""
+
+    strings = {
+        "name": "VideoDownloader",
+        "usage": "Укажи ссылку: <code>.vdown https://...</code>",
+        "downloading": "⏳ Скачиваю видео…",
+        "unsupported": "❌ Ссылка не распознана или сайт не поддерживается.",
+        "too_large": "❌ Файл слишком большой для отправки в Telegram.",
+        "error": "❌ Не удалось скачать видео: <code>{}</code>",
+        "done": "📹 <b>{}</b>\nАвтор модуля: @Kilka_Young",
+    }
+
+    __author__ = ["@Kilka_Young"]
+
+    # Список распространённых видеоплатформ. Его можно расширить.
+    ALLOWED_DOMAINS = {
+        "youtube.com",
+        "youtu.be",
+        "tiktok.com",
+        "instagram.com",
+        "twitter.com",
+        "x.com",
+        "facebook.com",
+        "fb.watch",
+        "vimeo.com",
+        "twitch.tv",
+        "reddit.com",
+    }
+
+    URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
+    MAX_SIZE = 1_900_000_000  # около 1,9 ГБ
+
+    def _valid_url(self, url):
+        try:
+            host = (urlparse(url).hostname or "").lower()
+            return any(
+                host == domain or host.endswith("." + domain)
+                for domain in self.ALLOWED_DOMAINS
+            )
+        except Exception:
+            return False
+
+    def _download(self, url, directory):
+        options = {
+            "format": "best[ext=mp4]/best",
+            "outtmpl": os.path.join(directory, "%(title).150B-%(id)s.%(ext)s"),
+            "merge_output_format": "mp4",
+            "max_filesize": self.MAX_SIZE,
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+        }
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get("title") or "Видео"
+
+        files = [
+            os.path.join(directory, name)
+            for name in os.listdir(directory)
+            if not name.endswith((".part", ".ytdl"))
+        ]
+        if not files:
+            raise RuntimeError("Не найден скачанный файл")
+
+        path = max(files, key=os.path.getsize)
+        if os.path.getsize(path) > self.MAX_SIZE:
+            raise ValueError("too_large")
+
+        return path, title
+
+    @loader.command(
+        ru_doc="Скачать видео по ссылке: .vdown <ссылка>"
+    )
+    async def vdown(self, message):
+        """Скачать видео по ссылке."""
+
+        args = utils.get_args_raw(message)
+        match = self.URL_RE.search(args or "")
+
+        if not match:
+            reply = await message.get_reply_message()
+            if reply and reply.raw_text:
+                match = self.URL_RE.search(reply.raw_text)
+
+        if not match:
+            await utils.answer(message, self.strings["usage"])
+            return
+
+        url = match.group(0).rstrip(".,!?)]}")
+        if not self._valid_url(url):
+            await utils.answer(message, self.strings["unsupported"])
+            return
+
+        status = await utils.answer(message, self.strings["downloading"])
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="hikka_video_") as directory:
+                path, title = await asyncio.to_thread(
+                    self._download, url, directory
+                )
+
+                await message.client.send_file(
+                    message.peer_id,
+                    path,
+                    caption=self.strings["done"].format(title[:700]),
+                    reply_to=message.id,
+                )
+
+            await status.delete()
+
+        except ValueError as exc:
+            if str(exc) == "too_large":
+                await utils.answer(message, self.strings["too_large"])
+            else:
+                await utils.answer(message, self.strings["error"].format(str(exc)[:300]))
+
+        except Exception as exc:
+            await utils.answer(message, self.strings["error"].format(str(exc)[:300]))
