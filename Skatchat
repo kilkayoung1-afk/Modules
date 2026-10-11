@@ -1,26 +1,18 @@
-# userbot.py
-# Telegram UserBot: скачивание видео с YouTube, TikTok, Instagram, Twitter/X, VK и др.
+# Skatchat.py — модуль скачивания видео для Heroku UserBot
 # Author: @Kilka_Young
 
 import os
 import re
 import asyncio
-import logging
 import tempfile
 from pathlib import Path
 
 import yt_dlp
-from telethon import TelegramClient, events
-
-# ==================== КОНФИГ ====================
-API_ID = 1234567                    # получить на https://my.telegram.org
-API_HASH = "your_api_hash_here"     # получить на https://my.telegram.org
-SESSION_NAME = "userbot_session"
+from heroku import loader, utils  # стандартные импорты Heroku
 
 TEMP_DIR = Path(tempfile.gettempdir()) / "ub_downloads"
 TEMP_DIR.mkdir(exist_ok=True)
 
-MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB (лимит обычного Bot API)
 URL_REGEX = re.compile(r"https?://\S+")
 
 YDL_OPTS = {
@@ -32,35 +24,20 @@ YDL_OPTS = {
     "merge_output_format": "mp4",
     "retries": 3,
     "socket_timeout": 30,
-    # "cookiefile": "cookies.txt",  # раскомментируй, если TikTok/Instagram требуют cookies
 }
 
-# ==================== ЛОГИ ====================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-log = logging.getLogger("userbot")
 
-# ==================== КЛИЕНТ ====================
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-
-
-# ==================== YT-DLP ====================
 def _extract(url: str) -> dict:
     """Синхронное скачивание через yt-dlp."""
     with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
         info = ydl.extract_info(url, download=True)
         filepath = ydl.prepare_filename(info)
-
-        # после merge формат может измениться (например .webm -> .mp4)
         if not os.path.exists(filepath):
             base = os.path.splitext(filepath)[0]
             for ext in (".mp4", ".mkv", ".webm", ".mp3", ".m4a"):
                 if os.path.exists(base + ext):
                     filepath = base + ext
                     break
-
         return {
             "path": filepath,
             "title": info.get("title", "video"),
@@ -72,97 +49,79 @@ def _extract(url: str) -> dict:
 
 
 async def download_media(url: str) -> dict:
-    """Асинхронная обёртка над yt-dlp."""
     return await asyncio.get_event_loop().run_in_executor(None, _extract, url)
 
 
-# ==================== ХЕНДЛЕРЫ ====================
-@client.on(events.NewMessage(pattern=r"^\.dl(?:\s+(.+))?$", outgoing=True))
-async def dl_cmd(event):
-    arg = event.pattern_match.group(1)
-    url = None
+@loader.tds
+class SkatchatMod(loader.Module):
+    """Скачивание видео с YouTube, TikTok, Instagram и др."""
 
-    if arg and URL_REGEX.search(arg):
-        url = URL_REGEX.search(arg).group(0)
-    elif event.is_reply:
-        reply = await event.get_reply_message()
-        if reply and reply.text:
-            m = URL_REGEX.search(reply.text)
-            if m:
-                url = m.group(0)
+    strings = {"name": "Skatchat"}
 
-    if not url:
-        await event.edit("❌ Укажи ссылку: `.dl https://...` или ответь `.dl` на сообщение с ссылкой.")
-        return
+    @loader.command(alias="dl")
+    async def skatchat(self, message):
+        """Скачать видео по ссылке. Использование: .skatchat <url> или реплай на сообщение с ссылкой"""
+        args = utils.get_args_raw(message)
+        url = None
 
-    status = await event.edit("⏳ **Скачиваю...**")
+        if args and URL_REGEX.search(args):
+            url = URL_REGEX.search(args).group(0)
+        elif message.is_reply:
+            reply = await message.get_reply_message()
+            if reply and reply.text:
+                m = URL_REGEX.search(reply.text)
+                if m:
+                    url = m.group(0)
 
-    try:
-        data = await download_media(url)
-    except Exception as e:
-        log.exception("Ошибка скачивания")
-        await status.edit(f"❌ Ошибка: `{e}`")
-        return
+        if not url:
+            await utils.answer(
+                message,
+                "❌ Укажи ссылку: <code>.skatchat https://...</code> или ответь командой на сообщение с ссылкой.",
+            )
+            return
 
-    path = data["path"]
-    size = os.path.getsize(path)
+        status = await utils.answer(message, "⏳ <b>Скачиваю...</b>")
 
-    if size > MAX_FILE_SIZE:
-        await status.edit(f"❌ Файл слишком большой: {size / 1024 / 1024:.1f} MB")
         try:
+            data = await download_media(url)
+        except Exception as e:
+            await utils.answer(status, f"❌ Ошибка: <code>{e}</code>")
+            return
+
+        path = data["path"]
+        size = os.path.getsize(path)
+
+        if size > 2 * 1024 * 1024 * 1024:
+            await utils.answer(status, f"❌ Файл слишком большой: {size / 1024 / 1024:.1f} MB")
             os.remove(path)
-        except OSError:
-            pass
-        return
+            return
 
-    await status.edit("📤 **Отправляю...**")
+        await utils.answer(status, "📤 <b>Отправляю...</b>")
 
-    caption = (
-        f"🎬 **{data['title']}**\n"
-        f"👤 {data['uploader']}\n"
-        f"⏱ {data['duration']} сек\n"
-        f"🔗 [Источник]({data['webpage_url']})\n\n"
-        f"⚡ by @Kilka_Young"
-    )
-
-    try:
-        await client.send_file(
-            event.chat_id,
-            path,
-            caption=caption,
-            supports_streaming=True,
-            reply_to=event.reply_to_msg_id,
-            thumb=data.get("thumbnail"),
+        caption = (
+            f"🎬 <b>{data['title']}</b>\n"
+            f"👤 {data['uploader']}\n"
+            f"⏱ {data['duration']} сек\n"
+            f"🔗 <a href='{data['webpage_url']}'>Источник</a>\n\n"
+            f"⚡ by @Kilka_Young"
         )
-    finally:
+
         try:
-            os.remove(path)
-        except OSError:
+            await message.client.send_file(
+                message.chat_id,
+                path,
+                caption=caption,
+                supports_streaming=True,
+                reply_to=message.reply_to_msg_id,
+                thumb=data.get("thumbnail"),
+            )
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+        try:
+            await status.delete()
+        except Exception:
             pass
-
-    try:
-        await status.delete()
-    except Exception:
-        pass
-
-
-@client.on(events.NewMessage(pattern=r"^\.dlhelp$", outgoing=True))
-async def dl_help(event):
-    await event.edit(
-        "**📥 Downloader by @Kilka_Young**\n\n"
-        "• `.dl <url>` — скачать видео\n"
-        "• `.dl` (реплаем на сообщение с ссылкой) — скачать из реплая\n\n"
-        "**Поддержка:** YouTube, TikTok, Instagram, Twitter/X, VK, Reddit, Twitch и др."
-    )
-
-
-# ==================== ЗАПУСК ====================
-async def main():
-    await client.start()
-    me = await client.get_me()
-    log.info(f"✅ Юзербот запущен как {me.first_name} (@{me.username})")
-    await client.run_until_disconnected()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
